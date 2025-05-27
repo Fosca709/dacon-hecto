@@ -1,14 +1,31 @@
 from pathlib import Path
 
 import polars as pl
+import torch.nn as nn
+import torchvision.transforms.functional as F
 from sklearn.model_selection import StratifiedShuffleSplit
+from torchvision.transforms import InterpolationMode
+
+overlapped_categories = {
+    "K5_3세대_하이브리드_2020_2022": "K5_하이브리드_3세대_2020_2023",
+    "디_올뉴니로_2022_2025": "디_올_뉴_니로_2022_2025",
+    "718_박스터_2017_2024": "박스터_718_2017_2024",
+}
 
 
 def get_class_names(data_path: Path) -> list[str]:
     train_path = data_path / "train"
     class_path = list(train_path.iterdir())
     class_names = sorted([c.name for c in class_path])
+    for c in overlapped_categories.keys():
+        class_names.remove(c)
     return class_names
+
+
+def substitute_categories(df: pl.DataFrame) -> pl.DataFrame:
+    return df.with_columns(
+        pl.col("class").map_elements(lambda x: overlapped_categories.get(x, x), return_dtype=pl.String)
+    )
 
 
 def get_train_dataframe(data_path: Path) -> pl.DataFrame:
@@ -24,6 +41,7 @@ def get_train_dataframe(data_path: Path) -> pl.DataFrame:
         pl.col("folder_path").alias("image_path").map_elements(_get_image_path, return_dtype=pl.List(pl.String)),
     )
     df = df.explode(pl.col("image_path"))
+    df = substitute_categories(df)
     return df
 
 
@@ -47,3 +65,30 @@ def get_debug_dataframes(
     df_debug_train = df_debug[:train_size]
     df_debug_val = df_debug[train_size:]
     return df_debug_train, df_debug_val
+
+
+class Letterbox(nn.Module):
+    def __init__(self, size: int, fill=0):
+        super().__init__()
+        self.size = size
+        self.fill = fill
+
+    def forward(self, img):
+        w, h = F.get_image_size(img)
+
+        if h > w:
+            new_h = self.size
+            new_w = int(w * (self.size / h))
+        else:
+            new_w = self.size
+            new_h = int(h * (self.size / w))
+
+        resized_img = F.resize(img, [new_h, new_w], interpolation=InterpolationMode.BICUBIC)
+        padding_left = (self.size - new_w) // 2
+        padding_top = (self.size - new_h) // 2
+        padding_right = self.size - new_w - padding_left
+        padding_bottom = self.size - new_h - padding_top
+        padding = [padding_left, padding_top, padding_right, padding_bottom]
+
+        padded_img = F.pad(resized_img, padding, self.fill)
+        return padded_img
