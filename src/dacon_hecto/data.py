@@ -1,10 +1,9 @@
 from pathlib import Path
 
 import polars as pl
-import torch.nn as nn
-import torchvision.transforms.functional as F
+from datasets import Dataset
 from sklearn.model_selection import StratifiedShuffleSplit
-from torchvision.transforms import InterpolationMode
+from torch.utils.data import DataLoader
 
 overlapped_categories = {
     "K5_3세대_하이브리드_2020_2022": "K5_하이브리드_3세대_2020_2023",
@@ -67,28 +66,6 @@ def get_debug_dataframes(
     return df_debug_train, df_debug_val
 
 
-class Letterbox(nn.Module):
-    def __init__(self, size: int, fill=0):
-        super().__init__()
-        self.size = size
-        self.fill = fill
-
-    def forward(self, img):
-        w, h = F.get_image_size(img)
-
-        if h > w:
-            new_h = self.size
-            new_w = int(w * (self.size / h))
-        else:
-            new_w = self.size
-            new_h = int(h * (self.size / w))
-
-        resized_img = F.resize(img, [new_h, new_w], interpolation=InterpolationMode.BICUBIC)
-        padding_left = (self.size - new_w) // 2
-        padding_top = (self.size - new_h) // 2
-        padding_right = self.size - new_w - padding_left
-        padding_bottom = self.size - new_h - padding_top
-        padding = [padding_left, padding_top, padding_right, padding_bottom]
-
-        padded_img = F.pad(resized_img, padding, self.fill)
-        return padded_img
+def get_dataloader(df: pl.DataFrame, num_data_per_batch: int, shuffle: bool = True) -> DataLoader:
+    dataset = Dataset.from_polars(df)
+    return DataLoader(dataset=dataset, batch_size=num_data_per_batch, shuffle=shuffle)

@@ -1,29 +1,34 @@
-from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Self
 
+import msgspec
 import open_clip
+import safetensors
 import torch
 import torch.nn as nn
-from omegaconf import OmegaConf
 
 
-@dataclass
-class ClassifierConfig:
-    hidden_dim: int
-    num_classes: int
-    image_size: tuple[int]
-    normalize_mean: tuple[str]
-    normalize_std: tuple[str]
-    model_name: str | None = None
-
+class BaseConfig(msgspec.Struct):
     def save(self, config_path):
-        OmegaConf.save(self, config_path)
+        config_yaml = msgspec.yaml.encode(self)
+        with open(config_path, "wb") as f:
+            f.write(config_yaml)
 
     @classmethod
     def load(cls, config_path) -> Self:
-        config_dict = OmegaConf.load(config_path)
-        return ClassifierConfig(**config_dict)
+        with open(config_path, "rb") as f:
+            config_yaml = f.read()
+        return msgspec.yaml.decode(config_yaml, type=cls)
+
+
+class ClassifierConfig(BaseConfig):
+    hidden_dim: int
+    num_classes: int
+    image_size: tuple[int, int]
+    normalize_mean: tuple[float, float, float]
+    normalize_std: tuple[float, float, float]
+    model_name: str | None = None
 
 
 class Classifier(nn.Module):
@@ -32,14 +37,13 @@ class Classifier(nn.Module):
         vision_encoder: nn.Module,
         config: ClassifierConfig,
         device: str | torch.device = "cpu",
-        act_layer: nn.Module = nn.GELU,
     ):
         super().__init__()
         self.config = config
         self.vision_encoder = vision_encoder
         self.fc = nn.Sequential(
             nn.Linear(config.hidden_dim, config.hidden_dim),
-            act_layer(),
+            nn.GELU(),
             nn.Linear(config.hidden_dim, config.num_classes),
         ).to(device)
 
@@ -91,6 +95,7 @@ class Classifier(nn.Module):
             image_size=image_size,
             normalize_mean=normalize_mean,
             normalize_std=normalize_std,
+            model_name=model_name,
         )
 
         return Classifier(
@@ -99,4 +104,29 @@ class Classifier(nn.Module):
             device=device,
         )
 
-    # def save_model(self, model_path: Path):
+    def save_model(self, model_path: Path):
+        os.makedirs(model_path, exist_ok=True)
+
+        # save config
+        self.config.save(model_path / "config.yaml")
+
+        # save model
+        safetensors.torch.save_model(self, model_path / "model.safetensors")
+
+    @classmethod
+    def from_pretrained(cls, model_path: Path, device: str | torch.device) -> Self:
+        # load config
+        config = ClassifierConfig.load(model_path / "config.yaml")
+
+        # initialize vision encoder
+        clip_model = open_clip.create_model(
+            model_name=config.model_name, pretrained=None, device=device, force_image_size=config.image_size
+        )
+        vision_encoder = clip_model.visual
+
+        # initialize model
+        classifier = Classifier(vision_encoder=vision_encoder, config=config, device=device)
+
+        # load weights
+        safetensors.torch.load_model(classifier, model_path / "model.safetensors")
+        return classifier
