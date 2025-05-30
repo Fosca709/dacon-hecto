@@ -64,10 +64,16 @@ class DataProcessor:
         self.device = device
 
     def process(self, data: dict[str, Any]) -> dict[str, torch.Tensor]:
-        label = [self.class2id[c] for c in data["class"]]
-        label = torch.tensor(label).to(self.device)
+        processed = dict()
+
+        if "class" in data:
+            label = [self.class2id[c] for c in data["class"]]
+            label = torch.tensor(label).to(self.device)
+            processed["label"] = label
 
         image = [load_image(p) for p in data["image_path"]]
         image = [self.image_processor(image=i)["image"] for i in image]
         image = torch.stack(image).to(self.device)
-        return {"label": label, "image": image}
+        processed["image"] = image
+
+        return processed
