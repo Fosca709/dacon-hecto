@@ -2,24 +2,12 @@ import os
 from pathlib import Path
 from typing import Self
 
-import msgspec
 import open_clip
 import safetensors
 import torch
 import torch.nn as nn
 
-
-class BaseConfig(msgspec.Struct):
-    def save(self, config_path):
-        config_yaml = msgspec.yaml.encode(self)
-        with open(config_path, "wb") as f:
-            f.write(config_yaml)
-
-    @classmethod
-    def load(cls, config_path) -> Self:
-        with open(config_path, "rb") as f:
-            config_yaml = f.read()
-        return msgspec.yaml.decode(config_yaml, type=cls)
+from .config import BaseConfig
 
 
 class ClassifierConfig(BaseConfig):
@@ -108,7 +96,7 @@ class Classifier(nn.Module):
         os.makedirs(model_path, exist_ok=True)
 
         # save config
-        self.config.save(model_path / "config.yaml")
+        self.config.__save__(model_path / "config.yaml")
 
         # save model
         safetensors.torch.save_model(self, model_path / "model.safetensors")
@@ -116,7 +104,7 @@ class Classifier(nn.Module):
     @classmethod
     def from_pretrained(cls, model_path: Path, device: str | torch.device) -> Self:
         # load config
-        config = ClassifierConfig.load(model_path / "config.yaml")
+        config = ClassifierConfig.__load__(model_path / "config.yaml")
 
         # initialize vision encoder
         clip_model = open_clip.create_model(
