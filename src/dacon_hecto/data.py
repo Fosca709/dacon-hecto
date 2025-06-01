@@ -59,7 +59,7 @@ def train_val_split(df: pl.DataFrame, val_ratio: float = 0.1, random_state: int 
 
 
 def get_debug_dataframes(
-    df: pl.DataFrame, train_size: int = 500, val_size: int = 100, seed: int = 42
+    df: pl.DataFrame, train_size: int = 512, val_size: int = 128, seed: int = 42
 ) -> tuple[pl.DataFrame]:
     total_size = train_size + val_size
     df_debug = df.sample(n=total_size, shuffle=True, seed=seed)
@@ -71,3 +71,29 @@ def get_debug_dataframes(
 def get_dataloader(df: pl.DataFrame, num_data_per_batch: int, shuffle: bool = True) -> DataLoader:
     dataset = Dataset.from_polars(df)
     return DataLoader(dataset=dataset, batch_size=num_data_per_batch, shuffle=shuffle)
+
+
+def get_dataloader_from_config(
+    data_path: Path, num_data_per_batch: int, use_val: bool = True, debug: bool = False
+) -> tuple[DataLoader, DataLoader | None]:
+    df = get_train_dataframe(data_path)
+
+    if debug:
+        df_train, df_val = get_debug_dataframes(df)
+        if not use_val:
+            df_val = None
+
+    else:
+        if use_val:
+            df_train, df_val = train_val_split(df)
+
+        else:
+            df_train = df
+            df_val = None
+
+    train_dataloader = get_dataloader(df=df_train, num_data_per_batch=num_data_per_batch, shuffle=True)
+    if df_val is None:
+        val_dataloader = None
+    else:
+        val_dataloader = get_dataloader(df=df_val, num_data_per_batch=num_data_per_batch, shuffle=False)
+    return train_dataloader, val_dataloader

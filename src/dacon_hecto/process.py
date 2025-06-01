@@ -52,6 +52,17 @@ def get_letterbox_processor(
     )
 
 
+def get_image_processor_method(processor_type: str):
+    if processor_type == "default":
+        return get_default_processor
+
+    elif processor_type == "letterbox":
+        return get_letterbox_processor
+
+    else:
+        raise Exception("Unsupported processor name")
+
+
 class DataProcessor:
     def __init__(
         self,

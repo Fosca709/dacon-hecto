@@ -1,4 +1,4 @@
-from typing import Self
+from typing import Any, Self
 
 import msgspec
 from rich.console import Console
@@ -48,6 +48,9 @@ class BaseConfig(msgspec.Struct):
 
     def __print__(self) -> None:
         rich_console.print(self.__rich__())
+
+    def __to_dict__(self) -> dict[str, Any]:
+        return msgspec.to_builtins(self)
 
 
 def print_config(config: BaseConfig) -> None:
