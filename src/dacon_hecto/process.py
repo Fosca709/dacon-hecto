@@ -1,11 +1,9 @@
-from typing import Any, Callable
+from typing import Any
 
 import albumentations as A
 import cv2
 import numpy as np
 import torch
-
-type ImageProcessor = Callable[[Any], torch.Tensor]
 
 
 def load_image(image_path) -> np.ndarray:
@@ -19,7 +17,7 @@ def get_default_processor(
     normalize_mean: tuple[float, float, float],
     normalize_std: tuple[float, float, float],
     interpolation=cv2.INTER_AREA,
-) -> ImageProcessor:
+):
     h, w = image_size
     assert h == w
 
@@ -38,7 +36,7 @@ def get_letterbox_processor(
     normalize_mean: tuple[float, float, float],
     normalize_std: tuple[float, float, float],
     interpolation=cv2.INTER_AREA,
-) -> ImageProcessor:
+):
     h, w = image_size
     assert h == w
 
@@ -66,7 +64,7 @@ def get_image_processor_method(processor_type: str):
 class DataProcessor:
     def __init__(
         self,
-        image_processor: ImageProcessor,
+        image_processor,
         class2id: dict[str, int],
         device: str | torch.device,
     ):
