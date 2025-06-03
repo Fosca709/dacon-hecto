@@ -41,7 +41,8 @@ class BaseConfig(msgspec.Struct):
                 repr_field = f"{TAB * (num_tabs + 1)}{repr_k} {repr_v}"
             reprs.append(repr_field)
 
-        return f"{class_name}\n{'\n'.join(reprs)}"
+        repr_fields = "\n".join(reprs)
+        return f"{class_name}\n{repr_fields}"
 
     def __rich__(self) -> str:
         return self.__repr__(use_rich=True)
