@@ -118,3 +118,7 @@ class Classifier(nn.Module):
         # load weights
         safetensors.torch.load_model(classifier, model_path / "model.safetensors")
         return classifier
+
+    def set_encoder_grad(self, mode: bool):
+        for param in self.vision_encoder.parameters():
+            param.requires_grad_(mode)

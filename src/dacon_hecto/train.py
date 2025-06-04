@@ -84,17 +84,28 @@ def get_loss_fn(loss_name: str):
 def _train(
     model: Classifier,
     processor: DataProcessor,
-    optimizer: Optimizer,
-    scheduler: LRScheduler,
+    # optimizer: Optimizer,
+    # scheduler: LRScheduler,
+    optimizer_head_name: str,
+    lr_head: float,
+    lr_head_full: float,
+    optimizer_encoder_name: str,
+    lr_encoder: float,
     train_dataloader: DataLoader,
     val_dataloader: DataLoader | None,
     epoch: int,
+    epoch_freeze: int,
     tracker: WandbTracker,
     loss_fn=F.cross_entropy,
+    label_smoothing: float = 0.0,
+    accumulation_steps: int = 1,
+    max_grad_norm: float | None = 1.0,
     save_path: Path | None = None,
     log_path: Path | None = None,
     hf_hub_manager: HFHubManager | None = None,
 ) -> None:
+    assert epoch_freeze <= epoch
+
     if save_path is not None and os.path.exists(save_path):
         raise Exception("save_path already exists")
 
@@ -106,12 +117,26 @@ def _train(
     val_steps = len(val_dataloader)
     val_metrics = defaultdict(list)
 
+    optimizer_head = get_optimizer(model.fc, optimizer_name=optimizer_head_name, learning_rate=lr_head)
+
+    optimizer_encoder = get_optimizer(
+        model.vision_encoder, optimizer_name=optimizer_encoder_name, learning_rate=lr_encoder
+    )
+
+    is_freeze = True
+    model.set_encoder_grad(False)
+
     with Progress(refresh_per_second=1.0) as progress:
         train_bar = progress.add_task("train", total=total_steps)
         val_bar = progress.add_task("validation", total=val_steps, visible=False)
         global_step = 1
 
         for ep in range(epoch):
+            if is_freeze and (ep >= epoch_freeze):
+                model.set_encoder_grad(True)
+                is_freeze = False
+                optimizer_head.param_groups[0]["lr"] = lr_head_full
+
             model.train()
             for batch in train_dataloader:
                 batch = processor.process(batch)
@@ -119,12 +144,10 @@ def _train(
                 label = batch["label"]
 
                 output = model(image)
-                loss = loss_fn(output, label)
-                loss.backward()
+                loss = loss_fn(output, label, label_smoothing=label_smoothing)
+                (loss / accumulation_steps).backward()
 
-                tracker.run.log(
-                    {"train/step": global_step, "train/loss": loss.item(), "train/lr": optimizer.param_groups[0]["lr"]}
-                )
+                tracker.run.log({"train/step": global_step, "train/loss": loss.item()})
 
                 if tracker.is_param_update(step=global_step):
                     with torch.no_grad():
@@ -136,9 +159,23 @@ def _train(
                                     {"grad/step": global_step, f"grad/{name}_norm": param.grad.norm().item()}
                                 )
 
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
+                if global_step % accumulation_steps == 0:
+                    lr_info = {"train/step": global_step, "train/lr_head": optimizer_head.param_groups[0]["lr"]}
+
+                    if max_grad_norm is not None:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+
+                    optimizer_head.step()
+                    # scheduler.step()
+
+                    if not is_freeze:
+                        lr_info.update({"train/encoder_head": optimizer_encoder.param_groups[0]["lr"]})
+                        optimizer_encoder.step()
+                        optimizer_encoder.zero_grad()
+
+                    tracker.run.log(lr_info)
+
+                    optimizer_head.zero_grad()
 
                 global_step += 1
                 progress.update(train_bar, advance=1)
@@ -213,15 +250,22 @@ class TrainConfig(BaseConfig):
     use_val: bool = True
     debug: bool = False
     num_data_per_batch: int = 32
+    accumulation_steps: int = 1
     processor_type: str = "default"
     device: str = "cuda"
-    optimizer: str = "adamw"
-    learning_rate: float = 1e-2
-    weight_dacay: float = 0.01
-    scheduler: str = "constant"
-    warmup_ratio: float = 0.1
+    optimizer_head: str = "adamw"
+    lr_head: float = 1e-2
+    lr_head_full: float = 1e-3
+    optimizer_encoder: str = "adamw"
+    lr_encoder: float = 1e-4
+    # weight_dacay: float = 0.01
+    # scheduler: str = "constant"
+    # warmup_ratio: float = 0.1
+    max_grad_norm: float | None = None
     epoch: int = 3
+    epoch_freeze: int = 3
     loss: str = "cross_entropy"
+    label_smoothing: float = 0.0
     use_wandb: bool = False
     project_name: str = "dacon-hecto"
     param_log_freq: int = -1
@@ -253,18 +297,18 @@ def train(
     )
     processor = DataProcessor(image_processor=image_processor, class2id=class2id, device=config.device)
 
-    optimizer = get_optimizer(
-        model=model,
-        optimizer_name=config.optimizer,
-        learning_rate=config.learning_rate,
-        weight_decay=config.weight_dacay,
-    )
+    # optimizer = get_optimizer(
+    #     model=model,
+    #     optimizer_name=config.optimizer,
+    #     learning_rate=config.learning_rate,
+    #     weight_decay=config.weight_dacay,
+    # )
 
-    training_steps = len(train_dataloader) * config.epoch
-    warmup_steps = int(training_steps * config.warmup_ratio)
-    scheduler = get_scheduler(
-        optimizer=optimizer, scheduler_name=config.scheduler, training_steps=training_steps, warmup_steps=warmup_steps
-    )
+    # training_steps = (len(train_dataloader) * config.epoch) // config.accumulation_steps
+    # warmup_steps = int(training_steps * config.warmup_ratio)
+    # scheduler = get_scheduler(
+    #     optimizer=optimizer, scheduler_name=config.scheduler, training_steps=training_steps, warmup_steps=warmup_steps
+    # )
 
     loss_fn = get_loss_fn(config.loss)
 
@@ -321,13 +365,20 @@ def train(
     _train(
         model=model,
         processor=processor,
-        optimizer=optimizer,
-        scheduler=scheduler,
+        optimizer_head_name=config.optimizer_head,
+        lr_head=config.lr_head,
+        lr_head_full=config.lr_head_full,
+        optimizer_encoder_name=config.optimizer_encoder,
+        lr_encoder=config.lr_encoder,
         train_dataloader=train_dataloader,
         val_dataloader=val_dataloader,
         epoch=config.epoch,
+        epoch_freeze=config.epoch_freeze,
         tracker=tracker,
         loss_fn=loss_fn,
+        label_smoothing=config.label_smoothing,
+        accumulation_steps=config.accumulation_steps,
+        max_grad_norm=config.max_grad_norm,
         save_path=save_path,
         log_path=log_path,
         hf_hub_manager=hf_hub_manager,
