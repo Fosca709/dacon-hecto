@@ -97,8 +97,8 @@ class DataProcessorWithAugmentation(DataProcessor):
             [
                 A.HorizontalFlip(p=0.5),
                 A.Affine(translate_px=(-10, 10), rotate=(-10, 10), p=0.5),
-                A.Blur(blur_limit=(3, 5), p=0.25),
-                A.RandomBrightnessContrast(p=0.25),
+                A.Blur(blur_limit=(3, 5), p=0.5),
+                A.RandomBrightnessContrast(p=0.5),
                 A.CoarseDropout(p=0.5),
                 self.image_processor,
             ]

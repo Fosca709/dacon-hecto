@@ -36,12 +36,8 @@ def get_scheduler(
         raise Exception("Unsupported scheduler name")
 
 
-"""
-Adapted from: https://github.com/davda54/sam
-This function is used under the terms of the MIT License from the original repo.
-"""
-
-
+# Adapted from: https://github.com/davda54/sam
+# This function is used under the terms of the MIT License from the original repo.
 class SAM(torch.optim.Optimizer):
     def __init__(self, params, base_optimizer, rho=0.05, adaptive=False, **kwargs):
         assert rho >= 0.0, f"Invalid rho, should be non-negative: {rho}"

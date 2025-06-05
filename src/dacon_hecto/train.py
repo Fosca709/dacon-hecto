@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 from loguru import logger
@@ -72,9 +73,34 @@ class MockRun:
     def finish(self): ...
 
 
-def get_loss_fn(loss_name: str):
+# Gradient Boosting Cross Entropy (GBCE) loss from
+# Fine-grained Recognition: Accounting for Subtle Differences between Similar Classes
+# (https://arxiv.org/abs/1912.06842)
+class GBCE(nn.Module):
+    def __init__(self, k: int, label_smoothing: float = 0.0):
+        super().__init__()
+        self.k = k
+        self.label_smoothing = label_smoothing
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        input = input.clone()
+        B = input.shape[0]
+        input_truth = input[torch.arange(B), target].view(-1, 1)
+        input[torch.arange(B), target] = float("-inf")
+        input_topk = torch.topk(input, k=self.k, dim=-1).values
+        input_selected = torch.concat([input_truth, input_topk], dim=-1)
+
+        target_new = torch.zeros_like(target)
+        return F.cross_entropy(input_selected, target_new, label_smoothing=self.label_smoothing)
+
+
+def get_loss_fn(loss_name: str, label_smoothing: float = 0.0, top_k: int = 15, **kwargs):
     if loss_name == "cross_entropy":
-        return F.cross_entropy
+        return nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+
+    elif loss_name == "gbce":
+        return GBCE(k=top_k, label_smoothing=label_smoothing)
+
     else:
         raise Exception("Unsupported loss name")
 
@@ -95,8 +121,7 @@ def _train(
     epoch: int,
     epoch_freeze: int,
     tracker: WandbTracker,
-    loss_fn=F.cross_entropy,
-    label_smoothing: float = 0.0,
+    loss_fn: nn.Module,
     accumulation_steps: int = 1,
     max_grad_norm: float | None = 1.0,
     save_path: Path | None = None,
@@ -165,7 +190,7 @@ def _train(
                     input_list.append(batch)
 
                 output = model(image)
-                loss = loss_fn(output, label, label_smoothing=label_smoothing)
+                loss = loss_fn(output, label)
                 (loss / accumulation_steps).backward()
 
                 tracker.run.log({"train/step": global_step, "train/loss": loss.item()})
@@ -199,7 +224,7 @@ def _train(
                             label = batch["label"]
 
                             output = model(image)
-                            loss = loss_fn(output, label, label_smoothing=label_smoothing)
+                            loss = loss_fn(output, label)
                             (loss / accumulation_steps).backward()
 
                         if max_grad_norm is not None:
@@ -319,6 +344,7 @@ class TrainConfig(BaseConfig):
     epoch_freeze: int = 3
     loss: str = "cross_entropy"
     label_smoothing: float = 0.0
+    gbce_top_k: int = 15
     use_wandb: bool = False
     project_name: str = "dacon-hecto"
     param_log_freq: int = -1
@@ -369,20 +395,7 @@ def train(
     batch_size = config.num_data_per_batch * processor.num_data_per_image
     logger.info(f"batch size: {batch_size} / effective batch size: {batch_size * config.accumulation_steps}")
 
-    # optimizer = get_optimizer(
-    #     model=model,
-    #     optimizer_name=config.optimizer,
-    #     learning_rate=config.learning_rate,
-    #     weight_decay=config.weight_dacay,
-    # )
-
-    # training_steps = (len(train_dataloader) * config.epoch) // config.accumulation_steps
-    # warmup_steps = int(training_steps * config.warmup_ratio)
-    # scheduler = get_scheduler(
-    #     optimizer=optimizer, scheduler_name=config.scheduler, training_steps=training_steps, warmup_steps=warmup_steps
-    # )
-
-    loss_fn = get_loss_fn(config.loss)
+    loss_fn = get_loss_fn(loss_name=config.loss, label_smoothing=config.label_smoothing, top_k=config.gbce_top_k)
 
     if config.use_wandb:
         try:
@@ -449,7 +462,6 @@ def train(
         epoch_freeze=config.epoch_freeze,
         tracker=tracker,
         loss_fn=loss_fn,
-        label_smoothing=config.label_smoothing,
         accumulation_steps=config.accumulation_steps,
         max_grad_norm=config.max_grad_norm,
         save_path=save_path,
