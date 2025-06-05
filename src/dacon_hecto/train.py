@@ -17,7 +17,7 @@ from .config import BaseConfig
 from .data import get_class_names, get_dataloader_from_config
 from .model import Classifier
 from .optimizer import get_optimizer, get_scheduler
-from .process import DataProcessor, get_image_processor_method
+from .process import DataProcessor, DataProcessorWithAugmentation, get_image_processor_method
 from .utils import HFHubManager
 
 logger.remove()
@@ -91,6 +91,7 @@ def _train(
     lr_head_full: float,
     optimizer_encoder_name: str,
     lr_encoder: float,
+    warmup_ratio: float,
     train_dataloader: DataLoader,
     val_dataloader: DataLoader | None,
     epoch: int,
@@ -103,6 +104,7 @@ def _train(
     save_path: Path | None = None,
     log_path: Path | None = None,
     hf_hub_manager: HFHubManager | None = None,
+    progress_refresh_per_second: float = 1.0,
 ) -> None:
     assert epoch_freeze <= epoch
 
@@ -126,7 +128,7 @@ def _train(
     is_freeze = True
     model.set_encoder_grad(False)
 
-    with Progress(refresh_per_second=1.0) as progress:
+    with Progress(refresh_per_second=progress_refresh_per_second) as progress:
         train_bar = progress.add_task("train", total=total_steps)
         val_bar = progress.add_task("validation", total=val_steps, visible=False)
         global_step = 1
@@ -135,11 +137,24 @@ def _train(
             if is_freeze and (ep >= epoch_freeze):
                 model.set_encoder_grad(True)
                 is_freeze = False
-                optimizer_head.param_groups[0]["lr"] = lr_head_full
+
+                optimizer_head = get_optimizer(model.fc, optimizer_name=optimizer_head_name, learning_rate=lr_head_full)
+
+                training_steps = (epoch - epoch_freeze) * steps_per_epoch // accumulation_steps
+                warmup_steps = int(training_steps * warmup_ratio)
+                scheduler_head = get_scheduler(
+                    optimizer_head, scheduler_name="constant", training_steps=training_steps, warmup_steps=warmup_steps
+                )
+                scheduler_encoder = get_scheduler(
+                    optimizer_encoder,
+                    scheduler_name="constant",
+                    training_steps=training_steps,
+                    warmup_steps=warmup_steps,
+                )
 
             model.train()
             for batch in train_dataloader:
-                batch = processor.process(batch)
+                batch = processor.process_train(batch)
                 image = batch["image"]
                 label = batch["label"]
 
@@ -169,8 +184,12 @@ def _train(
                     # scheduler.step()
 
                     if not is_freeze:
-                        lr_info.update({"train/encoder_head": optimizer_encoder.param_groups[0]["lr"]})
+                        lr_info.update({"train/lr_encoder": optimizer_encoder.param_groups[0]["lr"]})
                         optimizer_encoder.step()
+
+                        scheduler_head.step()
+                        scheduler_encoder.step()
+
                         optimizer_encoder.zero_grad()
 
                     tracker.run.log(lr_info)
@@ -188,7 +207,7 @@ def _train(
 
                     progress.update(val_bar, visible=True)
                     for batch in val_dataloader:
-                        batch = processor.process(batch)
+                        batch = processor.process_eval(batch)
                         image = batch["image"]
                         label = batch["label"]
 
@@ -251,7 +270,9 @@ class TrainConfig(BaseConfig):
     debug: bool = False
     num_data_per_batch: int = 32
     accumulation_steps: int = 1
-    processor_type: str = "default"
+    processor_type: str = "letterbox"
+    use_augmentation: bool = True
+    num_data_per_image: int = 4
     device: str = "cuda"
     optimizer_head: str = "adamw"
     lr_head: float = 1e-2
@@ -260,7 +281,7 @@ class TrainConfig(BaseConfig):
     lr_encoder: float = 1e-4
     # weight_dacay: float = 0.01
     # scheduler: str = "constant"
-    # warmup_ratio: float = 0.1
+    warmup_ratio: float = 0.1
     max_grad_norm: float | None = None
     epoch: int = 3
     epoch_freeze: int = 3
@@ -273,7 +294,12 @@ class TrainConfig(BaseConfig):
 
 
 def train(
-    model: Classifier, config: TrainConfig, data_path: Path, save_path: Path | None = None, log_path: Path | None = None
+    model: Classifier,
+    config: TrainConfig,
+    data_path: Path,
+    save_path: Path | None = None,
+    log_path: Path | None = None,
+    progress_refresh_per_second: float = 1.0,
 ) -> None:
     class_names = get_class_names(data_path)
     class2id = {c: i for i, c in enumerate(class_names)}
@@ -285,8 +311,7 @@ def train(
     size_val_dataloader = None if (val_dataloader is None) else len(val_dataloader)
     logger.info(f"val_dataloader size: {size_val_dataloader}")
 
-    # TODO: This should be modified after data augmentation has been implemented.
-    logger.info(f"effective batch size: {config.num_data_per_batch}")
+    logger.info(f"batch size: {config.num_data_per_batch * config.num_data_per_image}")
 
     logger.info(f"image_size: {model.config.image_size}")
     image_processor_method = get_image_processor_method(processor_type=config.processor_type)
@@ -295,7 +320,17 @@ def train(
         normalize_mean=model.config.normalize_mean,
         normalize_std=model.config.normalize_std,
     )
-    processor = DataProcessor(image_processor=image_processor, class2id=class2id, device=config.device)
+
+    if config.use_augmentation:
+        processor = DataProcessorWithAugmentation(
+            image_processor=image_processor,
+            class2id=class2id,
+            device=config.device,
+            num_data_per_image=config.num_data_per_image,
+        )
+
+    else:
+        processor = DataProcessor(image_processor=image_processor, class2id=class2id, device=config.device)
 
     # optimizer = get_optimizer(
     #     model=model,
@@ -370,6 +405,7 @@ def train(
         lr_head_full=config.lr_head_full,
         optimizer_encoder_name=config.optimizer_encoder,
         lr_encoder=config.lr_encoder,
+        warmup_ratio=config.warmup_ratio,
         train_dataloader=train_dataloader,
         val_dataloader=val_dataloader,
         epoch=config.epoch,
@@ -382,4 +418,5 @@ def train(
         save_path=save_path,
         log_path=log_path,
         hf_hub_manager=hf_hub_manager,
+        progress_refresh_per_second=progress_refresh_per_second,
     )
