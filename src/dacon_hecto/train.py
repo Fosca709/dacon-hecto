@@ -9,8 +9,6 @@ import torch.nn.functional as F
 import wandb
 from loguru import logger
 from rich.progress import Progress
-from torch.optim import Optimizer
-from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader
 
 from .config import BaseConfig
@@ -86,11 +84,11 @@ def _train(
     processor: DataProcessor,
     # optimizer: Optimizer,
     # scheduler: LRScheduler,
-    optimizer_head_name: str,
+    optimizer_name: str,
     lr_head: float,
     lr_head_full: float,
-    optimizer_encoder_name: str,
     lr_encoder: float,
+    use_sam: bool,
     warmup_ratio: float,
     train_dataloader: DataLoader,
     val_dataloader: DataLoader | None,
@@ -119,10 +117,10 @@ def _train(
     val_steps = len(val_dataloader)
     val_metrics = defaultdict(list)
 
-    optimizer_head = get_optimizer(model.fc, optimizer_name=optimizer_head_name, learning_rate=lr_head)
+    optimizer_head = get_optimizer(model.fc, optimizer_name=optimizer_name, learning_rate=lr_head, use_sam=use_sam)
 
     optimizer_encoder = get_optimizer(
-        model.vision_encoder, optimizer_name=optimizer_encoder_name, learning_rate=lr_encoder
+        model.vision_encoder, optimizer_name=optimizer_name, learning_rate=lr_encoder, use_sam=use_sam
     )
 
     is_freeze = True
@@ -138,25 +136,33 @@ def _train(
                 model.set_encoder_grad(True)
                 is_freeze = False
 
-                optimizer_head = get_optimizer(model.fc, optimizer_name=optimizer_head_name, learning_rate=lr_head_full)
+                optimizer_head = get_optimizer(
+                    model.fc, optimizer_name=optimizer_name, learning_rate=lr_head_full, use_sam=use_sam
+                )
 
                 training_steps = (epoch - epoch_freeze) * steps_per_epoch // accumulation_steps
                 warmup_steps = int(training_steps * warmup_ratio)
+                base_optim_head = optimizer_head.base_optimizer if use_sam else optimizer_head
+                base_optim_encoder = optimizer_encoder.base_optimizer if use_sam else optimizer_encoder
+
                 scheduler_head = get_scheduler(
-                    optimizer_head, scheduler_name="constant", training_steps=training_steps, warmup_steps=warmup_steps
+                    base_optim_head, scheduler_name="constant", training_steps=training_steps, warmup_steps=warmup_steps
                 )
                 scheduler_encoder = get_scheduler(
-                    optimizer_encoder,
+                    base_optim_encoder,
                     scheduler_name="constant",
                     training_steps=training_steps,
                     warmup_steps=warmup_steps,
                 )
 
             model.train()
+            input_list = []
             for batch in train_dataloader:
                 batch = processor.process_train(batch)
                 image = batch["image"]
                 label = batch["label"]
+                if use_sam:
+                    input_list.append(batch)
 
                 output = model(image)
                 loss = loss_fn(output, label, label_smoothing=label_smoothing)
@@ -180,21 +186,48 @@ def _train(
                     if max_grad_norm is not None:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
 
-                    optimizer_head.step()
-                    # scheduler.step()
+                    if use_sam:
+                        optimizer_head.first_step(zero_grad=True)
+                        if not is_freeze:
+                            lr_info.update({"train/lr_encoder": optimizer_encoder.param_groups[0]["lr"]})
+                            optimizer_encoder.first_step(zero_grad=True)
 
-                    if not is_freeze:
-                        lr_info.update({"train/lr_encoder": optimizer_encoder.param_groups[0]["lr"]})
-                        optimizer_encoder.step()
+                        tracker.run.log(lr_info)
 
-                        scheduler_head.step()
-                        scheduler_encoder.step()
+                        for batch in input_list:
+                            image = batch["image"]
+                            label = batch["label"]
 
-                        optimizer_encoder.zero_grad()
+                            output = model(image)
+                            loss = loss_fn(output, label, label_smoothing=label_smoothing)
+                            (loss / accumulation_steps).backward()
 
-                    tracker.run.log(lr_info)
+                        if max_grad_norm is not None:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
 
-                    optimizer_head.zero_grad()
+                        optimizer_head.second_step(zero_grad=True)
+                        if not is_freeze:
+                            optimizer_encoder.second_step(zero_grad=True)
+                            scheduler_head.step()
+                            scheduler_encoder.step()
+
+                        input_list.clear()
+
+                    else:
+                        optimizer_head.step()
+
+                        if not is_freeze:
+                            lr_info.update({"train/lr_encoder": optimizer_encoder.param_groups[0]["lr"]})
+                            optimizer_encoder.step()
+
+                            scheduler_head.step()
+                            scheduler_encoder.step()
+
+                            optimizer_encoder.zero_grad()
+
+                        tracker.run.log(lr_info)
+
+                        optimizer_head.zero_grad()
 
                 global_step += 1
                 progress.update(train_bar, advance=1)
@@ -270,17 +303,16 @@ class TrainConfig(BaseConfig):
     debug: bool = False
     num_data_per_batch: int = 32
     accumulation_steps: int = 1
+    eval_batch_size: int = 32
     processor_type: str = "letterbox"
     use_augmentation: bool = True
     num_data_per_image: int = 4
     device: str = "cuda"
-    optimizer_head: str = "adamw"
+    optimizer: str = "adamw"
     lr_head: float = 1e-2
     lr_head_full: float = 1e-3
-    optimizer_encoder: str = "adamw"
     lr_encoder: float = 1e-4
-    # weight_dacay: float = 0.01
-    # scheduler: str = "constant"
+    use_sam: bool = False
     warmup_ratio: float = 0.1
     max_grad_norm: float | None = None
     epoch: int = 3
@@ -305,13 +337,15 @@ def train(
     class2id = {c: i for i, c in enumerate(class_names)}
 
     train_dataloader, val_dataloader = get_dataloader_from_config(
-        data_path=data_path, num_data_per_batch=config.num_data_per_batch, use_val=config.use_val, debug=config.debug
+        data_path=data_path,
+        num_data_per_batch=config.num_data_per_batch,
+        eval_batch_size=config.eval_batch_size,
+        use_val=config.use_val,
+        debug=config.debug,
     )
     logger.info(f"train_dataloader size: {len(train_dataloader)}")
     size_val_dataloader = None if (val_dataloader is None) else len(val_dataloader)
     logger.info(f"val_dataloader size: {size_val_dataloader}")
-
-    logger.info(f"batch size: {config.num_data_per_batch * config.num_data_per_image}")
 
     logger.info(f"image_size: {model.config.image_size}")
     image_processor_method = get_image_processor_method(processor_type=config.processor_type)
@@ -331,6 +365,9 @@ def train(
 
     else:
         processor = DataProcessor(image_processor=image_processor, class2id=class2id, device=config.device)
+
+    batch_size = config.num_data_per_batch * processor.num_data_per_image
+    logger.info(f"batch size: {batch_size} / effective batch size: {batch_size * config.accumulation_steps}")
 
     # optimizer = get_optimizer(
     #     model=model,
@@ -400,11 +437,11 @@ def train(
     _train(
         model=model,
         processor=processor,
-        optimizer_head_name=config.optimizer_head,
+        optimizer_name=config.optimizer,
         lr_head=config.lr_head,
         lr_head_full=config.lr_head_full,
-        optimizer_encoder_name=config.optimizer_encoder,
         lr_encoder=config.lr_encoder,
+        use_sam=config.use_sam,
         warmup_ratio=config.warmup_ratio,
         train_dataloader=train_dataloader,
         val_dataloader=val_dataloader,

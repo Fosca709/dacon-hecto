@@ -74,7 +74,7 @@ def get_dataloader(df: pl.DataFrame, num_data_per_batch: int, shuffle: bool = Tr
 
 
 def get_dataloader_from_config(
-    data_path: Path, num_data_per_batch: int, use_val: bool = True, debug: bool = False
+    data_path: Path, num_data_per_batch: int, eval_batch_size: int = 32, use_val: bool = True, debug: bool = False
 ) -> tuple[DataLoader, DataLoader | None]:
     df = get_train_dataframe(data_path)
 
@@ -95,5 +95,5 @@ def get_dataloader_from_config(
     if df_val is None:
         val_dataloader = None
     else:
-        val_dataloader = get_dataloader(df=df_val, num_data_per_batch=num_data_per_batch, shuffle=False)
+        val_dataloader = get_dataloader(df=df_val, num_data_per_batch=eval_batch_size, shuffle=False)
     return train_dataloader, val_dataloader
