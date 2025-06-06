@@ -5,7 +5,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 from loguru import logger
@@ -14,7 +13,7 @@ from torch.utils.data import DataLoader
 
 from .config import BaseConfig
 from .data import get_class_names, get_dataloader_from_config
-from .loss import ContrastiveLoss, get_loss_fn
+from .loss import GBCE, ContrastiveLoss
 from .model import Classifier
 from .optimizer import get_optimizer, get_scheduler
 from .process import DataProcessor, DataProcessorWithAugmentation, get_image_processor_method
@@ -90,10 +89,13 @@ def _train(
     epoch: int,
     epoch_freeze: int,
     tracker: WandbTracker,
-    loss_fn: nn.Module,
+    label_smoothing: float,
     use_contrastive: bool,
     contrastive_margin: tuple[float, float],
     contrastive_weight: float,
+    use_gbce: bool,
+    gbce_top_k: int,
+    gbce_weight: float,
     accumulation_steps: int = 1,
     max_grad_norm: float | None = 1.0,
     save_path: Path | None = None,
@@ -120,12 +122,17 @@ def _train(
         model.vision_encoder, optimizer_name=optimizer_name, learning_rate=lr_encoder, use_sam=use_sam
     )
 
+    if use_sam:
+        if use_contrastive or use_gbce:
+            raise Exception("SAM was built with cross entropy only. I didn't update the code and don't plan to.")
+
     if use_contrastive:
-        if use_sam:
-            raise Exception("SAM was built without contrastive loss. I didn't update the code and don't plan to.")
         contrastive_loss_fn = ContrastiveLoss(
             positive_margin=contrastive_margin[0], negative_margin=contrastive_margin[1]
         )
+
+    if use_gbce:
+        gbce_loss_fn = GBCE(k=gbce_top_k, label_smoothing=label_smoothing)
 
     is_freeze = True
     model.set_encoder_grad(False)
@@ -171,8 +178,13 @@ def _train(
                 z = model.vision_encoder(image)
                 output = model.fc(z)
 
-                loss = loss_fn(output, label)
+                loss = F.cross_entropy(output, label, label_smoothing=label_smoothing)
                 loss_info = {"train/step": global_step, "train/loss": loss.item()}
+
+                if use_gbce:
+                    loss_gbce = gbce_loss_fn(output, label)
+                    loss_info.update({"train/loss_gbce": loss_gbce.item()})
+                    loss += loss_gbce * gbce_weight
 
                 if use_contrastive and not is_freeze:
                     loss_contrastive = contrastive_loss_fn(z, label)
@@ -211,7 +223,7 @@ def _train(
                             label = batch["label"]
 
                             output = model(image)
-                            loss = loss_fn(output, label)
+                            loss = F.cross_entropy(output, label, label_smoothing=label_smoothing)
                             (loss / accumulation_steps).backward()
 
                         if max_grad_norm is not None:
@@ -329,9 +341,10 @@ class TrainConfig(BaseConfig):
     max_grad_norm: float | None = None
     epoch: int = 3
     epoch_freeze: int = 3
-    loss: str = "cross_entropy"
     label_smoothing: float = 0.0
+    use_gbce: bool = False
     gbce_top_k: int = 15
+    gbce_weight: float = 1.0
     use_contrastive: bool = False
     contrastive_margin: tuple[float, float] = (0.0, 0.4)
     contrastive_weight: float = 1.0
@@ -384,8 +397,6 @@ def train(
 
     batch_size = config.num_data_per_batch * processor.num_data_per_image
     logger.info(f"batch size: {batch_size} / effective batch size: {batch_size * config.accumulation_steps}")
-
-    loss_fn = get_loss_fn(loss_name=config.loss, label_smoothing=config.label_smoothing, top_k=config.gbce_top_k)
 
     if config.use_wandb:
         try:
@@ -451,10 +462,13 @@ def train(
         epoch=config.epoch,
         epoch_freeze=config.epoch_freeze,
         tracker=tracker,
-        loss_fn=loss_fn,
+        label_smoothing=config.label_smoothing,
         use_contrastive=config.use_contrastive,
         contrastive_margin=config.contrastive_margin,
         contrastive_weight=config.contrastive_weight,
+        use_gbce=config.use_gbce,
+        gbce_top_k=config.gbce_top_k,
+        gbce_weight=config.gbce_weight,
         accumulation_steps=config.accumulation_steps,
         max_grad_norm=config.max_grad_norm,
         save_path=save_path,
