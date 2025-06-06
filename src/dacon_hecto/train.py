@@ -171,7 +171,7 @@ def _train(
                 loss = loss_fn(output, label)
                 loss_info = {"train/step": global_step, "train/loss": loss.item()}
 
-                if use_contrastive:
+                if use_contrastive and not is_freeze:
                     loss_contrastive = contrastive_loss_fn(z, label)
                     loss_info.update({"train/loss_contrastive": loss_contrastive.item()})
                     loss += loss_contrastive
