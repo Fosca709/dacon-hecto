@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 
 from .config import BaseConfig
 from .data import get_class_names, get_dataloader_from_config
+from .loss import ContrastiveLoss, get_loss_fn
 from .model import Classifier
 from .optimizer import get_optimizer, get_scheduler
 from .process import DataProcessor, DataProcessorWithAugmentation, get_image_processor_method
@@ -73,38 +74,6 @@ class MockRun:
     def finish(self): ...
 
 
-# Gradient Boosting Cross Entropy (GBCE) loss from
-# Fine-grained Recognition: Accounting for Subtle Differences between Similar Classes
-# (https://arxiv.org/abs/1912.06842)
-class GBCE(nn.Module):
-    def __init__(self, k: int, label_smoothing: float = 0.0):
-        super().__init__()
-        self.k = k
-        self.label_smoothing = label_smoothing
-
-    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        input = input.clone()
-        B = input.shape[0]
-        input_truth = input[torch.arange(B), target].view(-1, 1)
-        input[torch.arange(B), target] = float("-inf")
-        input_topk = torch.topk(input, k=self.k, dim=-1).values
-        input_selected = torch.concat([input_truth, input_topk], dim=-1)
-
-        target_new = torch.zeros_like(target)
-        return F.cross_entropy(input_selected, target_new, label_smoothing=self.label_smoothing)
-
-
-def get_loss_fn(loss_name: str, label_smoothing: float = 0.0, top_k: int = 15, **kwargs):
-    if loss_name == "cross_entropy":
-        return nn.CrossEntropyLoss(label_smoothing=label_smoothing)
-
-    elif loss_name == "gbce":
-        return GBCE(k=top_k, label_smoothing=label_smoothing)
-
-    else:
-        raise Exception("Unsupported loss name")
-
-
 def _train(
     model: Classifier,
     processor: DataProcessor,
@@ -122,6 +91,8 @@ def _train(
     epoch_freeze: int,
     tracker: WandbTracker,
     loss_fn: nn.Module,
+    use_contrastive: bool,
+    contrastive_alpha: float,
     accumulation_steps: int = 1,
     max_grad_norm: float | None = 1.0,
     save_path: Path | None = None,
@@ -147,6 +118,11 @@ def _train(
     optimizer_encoder = get_optimizer(
         model.vision_encoder, optimizer_name=optimizer_name, learning_rate=lr_encoder, use_sam=use_sam
     )
+
+    if use_contrastive:
+        if use_sam:
+            raise Exception("SAM was built without contrastive loss. I didn't update the code and don't plan to.")
+        contrastive_loss_fn = ContrastiveLoss(alpha=contrastive_alpha)
 
     is_freeze = True
     model.set_encoder_grad(False)
@@ -189,11 +165,19 @@ def _train(
                 if use_sam:
                     input_list.append(batch)
 
-                output = model(image)
-                loss = loss_fn(output, label)
-                (loss / accumulation_steps).backward()
+                z = model.vision_encoder(image)
+                output = model.fc(z)
 
-                tracker.run.log({"train/step": global_step, "train/loss": loss.item()})
+                loss = loss_fn(output, label)
+                loss_info = {"train/step": global_step, "train/loss": loss.item()}
+
+                if use_contrastive:
+                    loss_contrastive = contrastive_loss_fn(z, label)
+                    loss_info.update({"train/loss_contrastive": loss_contrastive.item()})
+                    loss += loss_contrastive
+
+                tracker.run.log(loss_info)
+                (loss / accumulation_steps).backward()
 
                 if tracker.is_param_update(step=global_step):
                     with torch.no_grad():
@@ -345,6 +329,8 @@ class TrainConfig(BaseConfig):
     loss: str = "cross_entropy"
     label_smoothing: float = 0.0
     gbce_top_k: int = 15
+    use_contrastive: bool = False
+    contrastive_alpha: float = 0.4
     use_wandb: bool = False
     project_name: str = "dacon-hecto"
     param_log_freq: int = -1
@@ -462,6 +448,8 @@ def train(
         epoch_freeze=config.epoch_freeze,
         tracker=tracker,
         loss_fn=loss_fn,
+        use_contrastive=config.use_contrastive,
+        contrastive_alpha=config.contrastive_alpha,
         accumulation_steps=config.accumulation_steps,
         max_grad_norm=config.max_grad_norm,
         save_path=save_path,
