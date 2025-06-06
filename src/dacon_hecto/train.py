@@ -93,6 +93,7 @@ def _train(
     loss_fn: nn.Module,
     use_contrastive: bool,
     contrastive_alpha: float,
+    contrastive_weight: float,
     accumulation_steps: int = 1,
     max_grad_norm: float | None = 1.0,
     save_path: Path | None = None,
@@ -174,7 +175,7 @@ def _train(
                 if use_contrastive and not is_freeze:
                     loss_contrastive = contrastive_loss_fn(z, label)
                     loss_info.update({"train/loss_contrastive": loss_contrastive.item()})
-                    loss += loss_contrastive
+                    loss += loss_contrastive * contrastive_weight
 
                 tracker.run.log(loss_info)
                 (loss / accumulation_steps).backward()
@@ -331,6 +332,7 @@ class TrainConfig(BaseConfig):
     gbce_top_k: int = 15
     use_contrastive: bool = False
     contrastive_alpha: float = 0.4
+    contrastive_weight: float = 1.0
     use_wandb: bool = False
     project_name: str = "dacon-hecto"
     param_log_freq: int = -1
@@ -450,6 +452,7 @@ def train(
         loss_fn=loss_fn,
         use_contrastive=config.use_contrastive,
         contrastive_alpha=config.contrastive_alpha,
+        contrastive_weight=config.contrastive_weight,
         accumulation_steps=config.accumulation_steps,
         max_grad_norm=config.max_grad_norm,
         save_path=save_path,
