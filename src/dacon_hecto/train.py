@@ -92,7 +92,7 @@ def _train(
     tracker: WandbTracker,
     loss_fn: nn.Module,
     use_contrastive: bool,
-    contrastive_alpha: float,
+    contrastive_margin: tuple[float, float],
     contrastive_weight: float,
     accumulation_steps: int = 1,
     max_grad_norm: float | None = 1.0,
@@ -123,7 +123,9 @@ def _train(
     if use_contrastive:
         if use_sam:
             raise Exception("SAM was built without contrastive loss. I didn't update the code and don't plan to.")
-        contrastive_loss_fn = ContrastiveLoss(alpha=contrastive_alpha)
+        contrastive_loss_fn = ContrastiveLoss(
+            positive_margin=contrastive_margin[0], negative_margin=contrastive_margin[1]
+        )
 
     is_freeze = True
     model.set_encoder_grad(False)
@@ -331,7 +333,7 @@ class TrainConfig(BaseConfig):
     label_smoothing: float = 0.0
     gbce_top_k: int = 15
     use_contrastive: bool = False
-    contrastive_alpha: float = 0.4
+    contrastive_margin: tuple[float, float] = (0.0, 0.4)
     contrastive_weight: float = 1.0
     use_wandb: bool = False
     project_name: str = "dacon-hecto"
@@ -451,7 +453,7 @@ def train(
         tracker=tracker,
         loss_fn=loss_fn,
         use_contrastive=config.use_contrastive,
-        contrastive_alpha=config.contrastive_alpha,
+        contrastive_margin=config.contrastive_margin,
         contrastive_weight=config.contrastive_weight,
         accumulation_steps=config.accumulation_steps,
         max_grad_norm=config.max_grad_norm,

@@ -39,9 +39,10 @@ def get_loss_fn(loss_name: str, label_smoothing: float = 0.0, top_k: int = 15, *
 # TransFG: A Transformer Architecture for Fine-grained Recognition
 # (https://arxiv.org/abs/2103.07976)
 class ContrastiveLoss(nn.Module):
-    def __init__(self, alpha: float = 0.4):
+    def __init__(self, positive_margin: float = 0.0, negative_margin: float = 0.4):
         super().__init__()
-        self.alpha = alpha
+        self.positive_margin = positive_margin
+        self.negative_margin = negative_margin
 
     def forward(self, z: torch.Tensor, label: torch.Tensor) -> torch.Tensor:
         # z: [B, N] matrix of representations
@@ -53,7 +54,7 @@ class ContrastiveLoss(nn.Module):
         label_expanded = label.unsqueeze(1).expand(B, B)
         pairwise_label = (label_expanded == label_expanded.T).float()
 
-        positive_loss = pairwise_label * (1 - score)
-        negative_loss = (1 - pairwise_label) * torch.clamp(score - self.alpha, min=0)
+        positive_loss = pairwise_label * torch.clamp(1 - score - self.positive_margin, min=0)
+        negative_loss = (1 - pairwise_label) * torch.clamp(score - self.negative_margin, min=0)
         loss = (positive_loss + negative_loss).mean()
         return loss
