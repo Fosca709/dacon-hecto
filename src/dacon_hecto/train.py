@@ -76,12 +76,11 @@ class MockRun:
 def _train(
     model: Classifier,
     processor: DataProcessor,
-    # optimizer: Optimizer,
-    # scheduler: LRScheduler,
     optimizer_name: str,
     lr_head: float,
     lr_head_full: float,
     lr_encoder: float,
+    weight_decay: float,
     use_sam: bool,
     warmup_ratio: float,
     train_dataloader: DataLoader,
@@ -116,10 +115,16 @@ def _train(
     val_steps = len(val_dataloader)
     val_metrics = defaultdict(list)
 
-    optimizer_head = get_optimizer(model.fc, optimizer_name=optimizer_name, learning_rate=lr_head, use_sam=use_sam)
+    optimizer_head = get_optimizer(
+        model.fc, optimizer_name=optimizer_name, learning_rate=lr_head, weight_decay=weight_decay, use_sam=use_sam
+    )
 
     optimizer_encoder = get_optimizer(
-        model.vision_encoder, optimizer_name=optimizer_name, learning_rate=lr_encoder, use_sam=use_sam
+        model.vision_encoder,
+        optimizer_name=optimizer_name,
+        learning_rate=lr_encoder,
+        weight_decay=weight_decay,
+        use_sam=use_sam,
     )
 
     if use_sam:
@@ -148,7 +153,11 @@ def _train(
                 is_freeze = False
 
                 optimizer_head = get_optimizer(
-                    model.fc, optimizer_name=optimizer_name, learning_rate=lr_head_full, use_sam=use_sam
+                    model.fc,
+                    optimizer_name=optimizer_name,
+                    learning_rate=lr_head_full,
+                    weight_decay=weight_decay,
+                    use_sam=use_sam,
                 )
 
                 training_steps = (epoch - epoch_freeze) * steps_per_epoch // accumulation_steps
@@ -336,6 +345,7 @@ class TrainConfig(BaseConfig):
     lr_head: float = 1e-2
     lr_head_full: float = 1e-3
     lr_encoder: float = 1e-4
+    weight_decay: float = 0.0
     use_sam: bool = False
     warmup_ratio: float = 0.1
     max_grad_norm: float | None = None
@@ -455,6 +465,7 @@ def train(
         lr_head=config.lr_head,
         lr_head_full=config.lr_head_full,
         lr_encoder=config.lr_encoder,
+        weight_decay=config.weight_decay,
         use_sam=config.use_sam,
         warmup_ratio=config.warmup_ratio,
         train_dataloader=train_dataloader,

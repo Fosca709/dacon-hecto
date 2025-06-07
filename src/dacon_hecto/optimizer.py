@@ -1,18 +1,25 @@
 import torch
 import torch.nn as nn
-from torch.optim import Optimizer
+from pytorch_optimizer import Lion
+from torch.optim import SGD, AdamW, Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from transformers.optimization import get_constant_schedule_with_warmup
 
 
-def get_optimizer(model: nn.Module, optimizer_name: str, learning_rate: float, use_sam: bool = False) -> Optimizer:
+def get_optimizer(
+    model: nn.Module, optimizer_name: str, learning_rate: float, weight_decay: float, use_sam: bool = False
+) -> Optimizer:
     if optimizer_name == "adamw":
-        params = {"lr": learning_rate}
-        optimizer_class = torch.optim.Adam
+        params = {"lr": learning_rate, "weight_decay": weight_decay}
+        optimizer_class = AdamW
 
     elif optimizer_name == "sgd":
-        params = {"lr": learning_rate, "momentum": 0.9}
-        optimizer_class = torch.optim.SGD
+        params = {"lr": learning_rate, "momentum": 0.9, "weight_decay": weight_decay}
+        optimizer_class = SGD
+
+    elif optimizer_name == "lion":
+        params = {"lr": learning_rate, "weight_decay": weight_decay}
+        optimizer_class = Lion
 
     else:
         raise Exception("Unsupported optimizer name")
