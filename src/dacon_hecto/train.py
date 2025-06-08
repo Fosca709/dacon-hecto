@@ -1,9 +1,8 @@
 import os
+import shutil
 import sys
-from collections import defaultdict
 from pathlib import Path
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 import wandb
@@ -82,7 +81,9 @@ def _train(
     lr_encoder: float,
     weight_decay: float,
     use_sam: bool,
+    scheduler: str,
     warmup_ratio: float,
+    min_lr_rate: float,
     train_dataloader: DataLoader,
     val_dataloader: DataLoader | None,
     epoch: int,
@@ -97,6 +98,7 @@ def _train(
     gbce_weight: float,
     accumulation_steps: int = 1,
     max_grad_norm: float | None = 1.0,
+    save_strategy: str = "no",
     save_path: Path | None = None,
     log_path: Path | None = None,
     hf_hub_manager: HFHubManager | None = None,
@@ -113,7 +115,6 @@ def _train(
     steps_per_epoch = len(train_dataloader)
     total_steps = steps_per_epoch * epoch
     val_steps = len(val_dataloader)
-    val_metrics = defaultdict(list)
 
     optimizer_head = get_optimizer(
         model.fc, optimizer_name=optimizer_name, learning_rate=lr_head, weight_decay=weight_decay, use_sam=use_sam
@@ -146,6 +147,9 @@ def _train(
         train_bar = progress.add_task("train", total=total_steps)
         val_bar = progress.add_task("validation", total=val_steps, visible=False)
         global_step = 1
+        best_loss = float("inf")
+        best_epoch = -1
+        save_epoch = epoch - 1 if save_strategy == "last" else -1
 
         for ep in range(epoch):
             if is_freeze and (ep >= epoch_freeze):
@@ -166,13 +170,18 @@ def _train(
                 base_optim_encoder = optimizer_encoder.base_optimizer if use_sam else optimizer_encoder
 
                 scheduler_head = get_scheduler(
-                    base_optim_head, scheduler_name="constant", training_steps=training_steps, warmup_steps=warmup_steps
+                    base_optim_head,
+                    scheduler_name=scheduler,
+                    training_steps=training_steps,
+                    warmup_steps=warmup_steps,
+                    min_lr_rate=min_lr_rate,
                 )
                 scheduler_encoder = get_scheduler(
                     base_optim_encoder,
-                    scheduler_name="constant",
+                    scheduler_name=scheduler,
                     training_steps=training_steps,
                     warmup_steps=warmup_steps,
+                    min_lr_rate=min_lr_rate,
                 )
 
             model.train()
@@ -292,8 +301,6 @@ def _train(
                     accuracy = ((preds == labels).sum() / labels.numel()).item()
 
                     tracker.run.log({"val/epoch": ep, "val/loss": loss, "val/accuracy": accuracy})
-                    val_metrics["loss"].append(loss)
-                    val_metrics["accuracy"].append(accuracy)
 
                     progress.reset(val_bar, total=val_steps, visible=False)
 
@@ -305,15 +312,22 @@ def _train(
                         torch.save(logits, epoch_log_path / "logits.pt")
                         torch.save(labels, epoch_log_path / "labels.pt")
 
-            if save_path is not None:
-                model.save_model(save_path / f"epoch_{ep}")
+            if loss <= best_loss:
+                best_loss = loss
+                best_epoch = ep
+
+            if save_strategy == "best" and best_epoch == ep:
+                if os.path.exists(save_path / f"epoch_{save_epoch}"):
+                    shutil.rmtree(save_path / f"epoch_{save_epoch}")
+
+                save_epoch = best_epoch
+                model.save_model(save_path / f"epoch_{save_epoch}")
 
     if val_dataloader is not None:
-        val_metrics = {k: np.array(v) for k, v in val_metrics.items()}
-        best_epoch = np.argmin(val_metrics["loss"]).item()
-        val_metrics = {k: v[best_epoch].item() for k, v in val_metrics.items()}
-        val_metrics["best_epoch"] = best_epoch
-        tracker.run.summary.update(val_metrics)
+        tracker.run.summary.update({"loss": best_loss, "best_epoch": best_epoch})
+
+    if save_strategy == "last":
+        model.save_model(save_path / f"epoch_{save_epoch}")
 
     tracker.run.finish()
 
@@ -321,12 +335,9 @@ def _train(
         if save_path is None:
             logger.warning("`hf_hub_manager` requires `save_path` to be set.")
 
-        elif val_dataloader is None:
-            logger.warning("`hf_hub_manager` currently doesn't work without a `val_dataloader`.")
-
         else:
             save_name = save_path.name
-            folder_path = save_path / f"epoch_{best_epoch}"
+            folder_path = save_path / f"epoch_{save_epoch}"
             hf_hub_manager.push_to_hub(folder_path=folder_path, save_name=save_name)
 
 
@@ -347,7 +358,9 @@ class TrainConfig(BaseConfig):
     lr_encoder: float = 1e-4
     weight_decay: float = 0.0
     use_sam: bool = False
+    scheduler: str = "constant"
     warmup_ratio: float = 0.1
+    min_lr_rate: float = 0.1
     max_grad_norm: float | None = None
     epoch: int = 3
     epoch_freeze: int = 3
@@ -370,6 +383,7 @@ def train(
     data_path: Path,
     save_path: Path | None = None,
     log_path: Path | None = None,
+    save_strategy: str = "no",
     progress_refresh_per_second: float = 1.0,
 ) -> None:
     class_names = get_class_names(data_path)
@@ -433,11 +447,20 @@ def train(
     else:
         tracker = MockTracker()
 
-    if save_path is None:
+    if save_strategy == "no":
         logger.info("Model saving is disabled")
+
+    elif save_path is None:
+        raise Exception("`save_path` must be set for model saving.")
+
+    elif save_strategy not in ["best", "last"]:
+        raise Exception("Unsupported save strategy")
 
     else:
         save_path = save_path / config.run_name
+
+        if save_strategy == "best" and (val_dataloader is None):
+            raise Exception("`save_strategy='best'` requires `val_dataloader`")
 
     if log_path is None:
         logger.info("Log saving is disabled")
@@ -467,7 +490,9 @@ def train(
         lr_encoder=config.lr_encoder,
         weight_decay=config.weight_decay,
         use_sam=config.use_sam,
+        scheduler=config.scheduler,
         warmup_ratio=config.warmup_ratio,
+        min_lr_rate=config.min_lr_rate,
         train_dataloader=train_dataloader,
         val_dataloader=val_dataloader,
         epoch=config.epoch,
@@ -482,6 +507,7 @@ def train(
         gbce_weight=config.gbce_weight,
         accumulation_steps=config.accumulation_steps,
         max_grad_norm=config.max_grad_norm,
+        save_strategy=save_strategy,
         save_path=save_path,
         log_path=log_path,
         hf_hub_manager=hf_hub_manager,

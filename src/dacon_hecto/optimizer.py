@@ -3,7 +3,7 @@ import torch.nn as nn
 from pytorch_optimizer import Lion
 from torch.optim import SGD, AdamW, Optimizer
 from torch.optim.lr_scheduler import LRScheduler
-from transformers.optimization import get_constant_schedule_with_warmup
+from transformers.optimization import get_constant_schedule_with_warmup, get_cosine_with_min_lr_schedule_with_warmup
 
 
 def get_optimizer(
@@ -34,10 +34,22 @@ def get_optimizer(
 
 
 def get_scheduler(
-    optimizer: Optimizer, scheduler_name: str, training_steps: int, warmup_steps: int, **kwargs
+    optimizer: Optimizer,
+    scheduler_name: str,
+    training_steps: int,
+    warmup_steps: int,
+    min_lr_rate: float,
 ) -> LRScheduler:
     if scheduler_name == "constant":
-        return get_constant_schedule_with_warmup(optimizer=optimizer, num_warmup_steps=warmup_steps, **kwargs)
+        return get_constant_schedule_with_warmup(optimizer=optimizer, num_warmup_steps=warmup_steps)
+
+    if scheduler_name == "cosine":
+        return get_cosine_with_min_lr_schedule_with_warmup(
+            optimizer=optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=training_steps,
+            min_lr_rate=min_lr_rate,
+        )
 
     else:
         raise Exception("Unsupported scheduler name")
