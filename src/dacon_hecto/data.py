@@ -46,7 +46,9 @@ def get_train_dataframe(data_path: Path) -> pl.DataFrame:
     return df
 
 
-def train_val_split(df: pl.DataFrame, val_ratio: float = 0.1, random_state: int = 42) -> tuple[pl.DataFrame]:
+def train_val_split(
+    df: pl.DataFrame, val_ratio: float = 0.1, random_state: int = 42
+) -> tuple[pl.DataFrame, pl.DataFrame]:
     val_size = int(len(df) * val_ratio)
     splitter = StratifiedShuffleSplit(n_splits=1, test_size=val_size, random_state=random_state)
     split = list(splitter.split(X=df, y=df["class"]))
@@ -60,7 +62,7 @@ def train_val_split(df: pl.DataFrame, val_ratio: float = 0.1, random_state: int 
 
 def get_debug_dataframes(
     df: pl.DataFrame, train_size: int = 512, val_size: int = 128, seed: int = 42
-) -> tuple[pl.DataFrame]:
+) -> tuple[pl.DataFrame, pl.DataFrame]:
     total_size = train_size + val_size
     df_debug = df.sample(n=total_size, shuffle=True, seed=seed)
     df_debug_train = df_debug[:train_size]
@@ -97,3 +99,11 @@ def get_dataloader_from_config(
     else:
         val_dataloader = get_dataloader(df=df_val, num_data_per_batch=eval_batch_size, shuffle=False)
     return train_dataloader, val_dataloader
+
+
+def get_test_dataframe(data_path: Path) -> pl.DataFrame:
+    test_path = data_path / "test"
+    image_paths = [p.as_posix() for p in test_path.iterdir()]
+    ids = [p.name for p in test_path.iterdir()]
+    ids = [i.split(".")[0] for i in ids]
+    return pl.DataFrame({"ID": ids, "image_path": image_paths})

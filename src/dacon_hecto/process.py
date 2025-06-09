@@ -1,3 +1,4 @@
+from itertools import combinations, product
 from typing import Any
 
 import albumentations as A
@@ -116,6 +117,81 @@ class DataProcessorWithAugmentation(DataProcessor):
         image = [load_image(p) for p in data["image_path"]]
         image = [i for i in image for _ in range(self.num_data_per_image)]
         image = [self.augment_processor(image=i)["image"] for i in image]
+        image = torch.stack(image).to(self.device)
+        processed["image"] = image
+
+        return processed
+
+
+def group_combinations(groups: dict[str, Any], r: int):
+    for group_keys in combinations(groups.keys(), r):
+        for picks in product(*(groups[k] for k in group_keys)):
+            yield picks
+
+
+class TestDataProcessor(DataProcessor):
+    def __init__(
+        self,
+        image_processor,
+        class2id: dict[str, int],
+        device: str | torch.device,
+        use_tta: bool = False,
+        n: int | None = None,
+        r: int | None = None,
+    ):
+        super().__init__(image_processor=image_processor, class2id=class2id, device=device)
+        self.transforms = {
+            "flip": (A.HorizontalFlip(p=1),),
+            "shift_x": (A.Affine(translate_px={"x": 5}, p=1), A.Affine(translate_px={"x": -5}, p=1)),
+            "shift_y": (A.Affine(translate_px={"y": 5}, p=1), A.Affine(translate_px={"y": -5}, p=1)),
+            "rotate": (A.Affine(rotate=5, p=1), A.Affine(rotate=-5, p=1)),
+        }
+        self.use_tta = use_tta
+        self.n = n
+        self.r = r
+
+        self.__init_processor__()
+
+    def __init_processor__(self) -> None:
+        if not self.use_tta:
+            self.num_data_per_image = 1
+            self.processors = [self.image_processor]
+            return
+
+        if (self.n is None) == (self.r is None):
+            raise Exception("Exactly one of `n` or `r` must be set (not both or neither).")
+
+        r = len(self.transforms) if self.r is None else self.r
+        assert r <= len(self.transforms)
+
+        processors = [self.image_processor]
+        count = 1
+        for i in range(1, r + 1):
+            iterator = group_combinations(self.transforms, r=i)
+            for ts in iterator:
+                if count == self.n:
+                    break
+
+                processors.append(A.Compose([*ts, self.image_processor]))
+                count += 1
+
+        if (self.n is not None) and (count != self.n):
+            raise Exception(f"`n` is too large — the maximum allowed is {count}.")
+
+        self.processors = processors
+        self.num_data_per_image = len(processors)
+
+    def process_eval(self, data):
+        processed = dict()
+
+        if "class" in data:
+            label = [self.class2id[c] for c in data["class"]]
+            label = [x for x in label for _ in range(self.num_data_per_image)]
+            label = torch.tensor(label).to(self.device)
+            processed["label"] = label
+
+        image = [load_image(p) for p in data["image_path"]]
+        image = [p(image=i)["image"] for i in image for p in self.processors]
         image = torch.stack(image).to(self.device)
         processed["image"] = image
 
