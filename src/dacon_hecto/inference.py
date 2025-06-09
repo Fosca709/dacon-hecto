@@ -55,8 +55,8 @@ def get_probs(logits: torch.Tensor, num_data_per_image: int = 1):
     if num_data_per_image == 1:
         return probs
 
-    probs = probs.reshape(num_data_per_image, -1, logits.shape[-1])
-    probs = probs.mean(dim=0)
+    probs = probs.reshape(-1, num_data_per_image, logits.shape[-1])
+    probs = probs.mean(dim=1)
     return probs
 
 
