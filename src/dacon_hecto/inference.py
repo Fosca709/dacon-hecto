@@ -60,6 +60,17 @@ def get_probs(logits: torch.Tensor, num_data_per_image: int = 1):
     return probs
 
 
+def smoothing(probs: torch.Tensor, epsilon: float) -> torch.Tensor:
+    probs = probs.clone()
+    num_labels = probs.shape[-1]
+
+    probs += epsilon
+
+    preds = probs.argmax(dim=-1)
+    probs[torch.arange(probs.shape[0]), preds] -= num_labels * epsilon
+    return probs
+
+
 class EvalConfig(BaseConfig):
     mode: Literal["submission", "validation", "debug"] = "submission"
     num_data_per_batch: int = 32
@@ -68,6 +79,7 @@ class EvalConfig(BaseConfig):
     use_tta: bool = False
     tta_n: int | None = None
     tta_r: int | None = None
+    smoothing: float = 0.0
 
 
 def eval(
@@ -122,6 +134,9 @@ def eval(
 
     logits = _eval(model=model, dataloader=dataloader, processor=processor, refresh_per_second=refresh_per_second)
     probs = get_probs(logits, num_data_per_image=processor.num_data_per_image)
+
+    if config.smoothing > 0.0:
+        probs = smoothing(probs, epsilon=config.smoothing)
 
     if mode != "submission":
         labels = df["class"].replace_strict(class2id).to_torch()
