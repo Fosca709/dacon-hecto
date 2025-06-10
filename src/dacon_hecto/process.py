@@ -1,3 +1,4 @@
+import random
 from itertools import combinations, product
 from typing import Any
 
@@ -5,6 +6,7 @@ import albumentations as A
 import cv2
 import numpy as np
 import torch
+from albumentations.augmentations.crops.functional import crop
 
 
 def load_image(image_path) -> np.ndarray:
@@ -96,11 +98,12 @@ class DataProcessorWithAugmentation(DataProcessor):
         self.num_data_per_image = num_data_per_image
         self.augment_processor = A.Compose(
             [
-                A.HorizontalFlip(p=0.5),
-                A.Affine(translate_px=(-10, 10), rotate=(-10, 10), p=0.5),
-                A.Blur(blur_limit=(3, 5), p=0.5),
+                CropDown(p=0.25, ratio=(0.0, 0.3)),
+                CropRight(p=0.25, ratio=(0.0, 0.3)),
+                CropLeftAndUp(p=0.5, left=(0, 20), up=(0, 20)),
                 A.RandomBrightnessContrast(p=0.5),
                 A.CoarseDropout(p=0.5),
+                A.Affine(p=0.5, rotate=(-10, 10)),
                 self.image_processor,
             ]
         )
@@ -141,10 +144,10 @@ class TestDataProcessor(DataProcessor):
     ):
         super().__init__(image_processor=image_processor, class2id=class2id, device=device)
         self.transforms = {
-            "flip": (A.HorizontalFlip(p=1),),
-            "shift_x": (A.Affine(translate_px={"x": 5}, p=1), A.Affine(translate_px={"x": -5}, p=1)),
-            "shift_y": (A.Affine(translate_px={"y": 5}, p=1), A.Affine(translate_px={"y": -5}, p=1)),
+            "crop_x": (CropFixedPixel(p=1, left=5), CropFixedPixel(p=1, right=5)),
+            "crop_y": (CropFixedPixel(p=1, down=5), CropFixedPixel(p=1, up=5)),
             "rotate": (A.Affine(rotate=5, p=1), A.Affine(rotate=-5, p=1)),
+            "flip": (A.HorizontalFlip(p=1),),
         }
         self.use_tta = use_tta
         self.n = n
@@ -196,3 +199,64 @@ class TestDataProcessor(DataProcessor):
         processed["image"] = image
 
         return processed
+
+
+def crop_pixel(img: np.ndarray, left: int = 0, right: int = 0, up: int = 0, down: int = 0) -> np.ndarray:
+    h, w, _ = img.shape
+    return crop(img=img, x_min=left, y_min=up, x_max=w - right, y_max=h - down)
+
+
+def crop_ratio(
+    img: np.ndarray, left: float = 0.0, right: float = 0.0, up: float = 0.0, down: float = 0.0
+) -> np.ndarray:
+    h, w, _ = img.shape
+    x_min = int(w * left)
+    x_max = int(w * (1 - right))
+    y_min = int(h * up)
+    y_max = int(h * (1 - down))
+    return crop(img=img, x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max)
+
+
+class CropFixedPixel(A.ImageOnlyTransform):
+    def __init__(self, p: float, left: int = 0, right: int = 0, up: int = 0, down: int = 0):
+        super().__init__(p=p)
+        self.left = left
+        self.right = right
+        self.up = up
+        self.down = down
+
+    def apply(self, img: np.ndarray, **params):
+        return crop_pixel(img=img, left=self.left, right=self.right, up=self.up, down=self.down)
+
+
+class CropLeftAndUp(A.ImageOnlyTransform):
+    def __init__(self, p: float, left: tuple[int, int] = (0, 20), up: tuple[int, int] = (0, 20)):
+        super().__init__(p=p)
+        self.left = left
+        self.up = up
+
+    def apply(self, img: np.ndarray, **params):
+        left_px = random.randint(self.left[0], self.left[1])
+        up_px = random.randint(self.up[0], self.up[1])
+
+        return crop_pixel(img=img, left=left_px, up=up_px)
+
+
+class CropRight(A.ImageOnlyTransform):
+    def __init__(self, p: float, ratio: tuple[float, float] = (0.0, 0.3)):
+        super().__init__(p=p)
+        self.ratio = ratio
+
+    def apply(self, img: np.ndarray, **params):
+        ratio = random.uniform(self.ratio[0], self.ratio[1])
+        return crop_ratio(img=img, right=ratio)
+
+
+class CropDown(A.ImageOnlyTransform):
+    def __init__(self, p: float, ratio: tuple[float, float] = (0.0, 0.3)):
+        super().__init__(p=p)
+        self.ratio = ratio
+
+    def apply(self, img: np.ndarray, **params):
+        ratio = random.uniform(self.ratio[0], self.ratio[1])
+        return crop_ratio(img=img, down=ratio)
