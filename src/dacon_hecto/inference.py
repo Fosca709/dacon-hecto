@@ -1,4 +1,6 @@
+import pickle
 import sys
+from collections import defaultdict
 from pathlib import Path
 from typing import Literal
 
@@ -152,3 +154,85 @@ def make_submission(probs: np.ndarray, ids: pl.Series, class_names: list[str]) -
     df = pl.DataFrame(probs, schema=class_names)
     df = df.select(ids, pl.all(), *[pl.lit(0.0, dtype=pl.Float32).alias(name) for name in overlapped_categories.keys()])
     return df
+
+
+def _make_confusion_pairs(probs: torch.Tensor, num_pairs: int, count_limit: int, verbose: bool = True):
+    top2 = torch.topk(probs, k=2)
+    top2_probs = top2.values
+    top2_prob_diffs = (top2_probs[:, 0] - top2_probs[:, 1]).tolist()
+    top2_labels = top2.indices.tolist()
+
+    prob_diffs = defaultdict(float)
+    counter = defaultdict(int)
+    for d, ls in zip(top2_prob_diffs, top2_labels):
+        ls = tuple(sorted(ls))
+        prob_diffs[ls] += d
+        counter[ls] += 1
+
+    prob_means = {k: (prob_diffs[k] / v) for k, v in counter.items() if v >= count_limit}
+    pairs = sorted(prob_means, key=lambda x: prob_means[x])
+
+    if len(pairs) < num_pairs:
+        raise Exception(
+            f"Not enough eligible pairs (count_limit={count_limit}). Max available: {len(pairs)}, requested: {num_pairs}."
+        )
+
+    pairs = pairs[:num_pairs]
+    num_data = sum([counter[k] for k in pairs])
+
+    if verbose:
+        logger.info(f"Eligible pairs (count ≥ {count_limit}): {len(prob_means)}")
+        logger.info(f"Selected data covers {num_data / probs.size(0):.2%} of the dataset")
+
+    return pairs
+
+
+def make_confusion_pairs(
+    model: Classifier,
+    config: EvalConfig,
+    num_pairs: int,
+    count_limit: int,
+    data_path: Path,
+    save_name: str = "confusion_pairs.pkl",
+    refresh_per_second: float = 1.0,
+) -> None:
+    class_names = get_class_names(data_path)
+    class2id = {c: i for i, c in enumerate(class_names)}
+    id2class = {i: c for i, c in enumerate(class_names)}
+
+    mode = config.mode
+    if mode == "submission":
+        df = get_test_dataframe(data_path)
+
+    elif mode == "validation":
+        df = get_train_dataframe(data_path)
+        _, df = train_val_split(df)
+
+    elif mode == "debug":
+        df = get_train_dataframe(data_path)
+        _, df = get_debug_dataframes(df)
+
+    else:
+        raise Exception("Unsupported eval mode")
+
+    if config.use_tta:
+        logger.warning("Note: `use_tta=True` is set, but this method does not use TTA.")
+
+    dataloader = get_dataloader(df, num_data_per_batch=config.num_data_per_batch, shuffle=False)
+
+    image_processor_method = get_image_processor_method(config.processor_type)
+    image_processor = image_processor_method(
+        image_size=model.config.image_size,
+        normalize_mean=model.config.normalize_mean,
+        normalize_std=model.config.normalize_std,
+    )
+    processor = DataProcessor(image_processor=image_processor, class2id=class2id, device=config.device)
+
+    logits = _eval(model=model, dataloader=dataloader, processor=processor, refresh_per_second=refresh_per_second)
+    probs = get_probs(logits=logits, num_data_per_image=processor.num_data_per_image)
+
+    pairs = _make_confusion_pairs(probs=probs, num_pairs=num_pairs, count_limit=count_limit, verbose=True)
+    pairs = [(id2class[a], id2class[b]) for a, b in pairs]
+
+    with open(data_path / save_name, "wb") as f:
+        pickle.dump(pairs, f)
