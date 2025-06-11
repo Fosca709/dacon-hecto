@@ -1,9 +1,11 @@
+import random
+from collections import defaultdict
 from pathlib import Path
 
 import polars as pl
 from datasets import Dataset
 from sklearn.model_selection import StratifiedShuffleSplit
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 
 overlapped_categories = {
     "K5_3세대_하이브리드_2020_2022": "K5_하이브리드_3세대_2020_2023",
@@ -76,7 +78,14 @@ def get_dataloader(df: pl.DataFrame, num_data_per_batch: int, shuffle: bool = Tr
 
 
 def get_dataloader_from_config(
-    data_path: Path, num_data_per_batch: int, eval_batch_size: int = 32, use_val: bool = True, debug: bool = False
+    data_path: Path,
+    num_data_per_batch: int,
+    eval_batch_size: int = 32,
+    use_val: bool = True,
+    use_confused_pairs: bool = False,
+    num_pairs_per_batch: int = 1,
+    confusion_pairs: list[tuple[str, str]] | None = None,
+    debug: bool = False,
 ) -> tuple[DataLoader, DataLoader | None]:
     df = get_train_dataframe(data_path)
 
@@ -93,7 +102,16 @@ def get_dataloader_from_config(
             df_train = df
             df_val = None
 
-    train_dataloader = get_dataloader(df=df_train, num_data_per_batch=num_data_per_batch, shuffle=True)
+    if use_confused_pairs:
+        train_dataloader = get_dataloader(df=df_train, num_data_per_batch=num_data_per_batch, shuffle=True)
+    else:
+        train_dataloader = get_confused_pair_dataloader(
+            df=df,
+            confusion_pairs=confusion_pairs,
+            num_data_per_batch=num_data_per_batch,
+            num_pairs_per_batch=num_pairs_per_batch,
+        )
+
     if df_val is None:
         val_dataloader = None
     else:
@@ -107,3 +125,103 @@ def get_test_dataframe(data_path: Path) -> pl.DataFrame:
     ids = [p.name for p in test_path.iterdir()]
     ids = [i.split(".")[0] for i in ids]
     return pl.DataFrame({"ID": ids, "image_path": image_paths})
+
+
+class SetWithChoice:
+    def __init__(self, data: list | None = None):
+        assert len(data) == len(set(data))
+        self.data = [] if data is None else data.copy()
+        self.index_map = {k: i for i, k in enumerate(self.data)}
+
+    def add(self, val):
+        if val in self.index_map:
+            return
+
+        self.index_map[val] = len(self.data)
+        self.data.append(val)
+
+    def remove(self, val):
+        idx = self.index_map[val]
+        last_element = self.data[-1]
+
+        self.data[idx] = last_element
+        self.index_map[last_element] = idx
+
+        self.data.pop()
+        del self.index_map[val]
+
+    def contains(self, val):
+        return val in self.index_map
+
+    def choice(self):
+        return random.choice(self.data)
+
+    def choice_and_remove(self):
+        val = self.choice()
+        self.remove(val)
+        return val
+
+
+class ConfusedPairSampler(Sampler):
+    def __init__(
+        self, dataset: Dataset, confusion_pairs: list[tuple[str, str]], batch_size: int, num_pairs_per_batch: int
+    ):
+        self.dataset = dataset
+        self.confusion_pairs = confusion_pairs
+        self.batch_size = batch_size
+        self.num_pairs_per_batch = num_pairs_per_batch
+
+        assert batch_size >= 2 * num_pairs_per_batch
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __iter__(self):
+        remain_pairs = SetWithChoice(data=self.confusion_pairs)
+        total_indices = SetWithChoice(data=list(range(len(self.dataset))))
+        class_indices = defaultdict(list)
+        for i, d in enumerate(self.dataset):
+            class_indices[d["class"]].append(i)
+        class_indices = {k: SetWithChoice(data=v) for k, v in class_indices.items()}
+
+        i = 0
+        while i < len(self.dataset):
+            use_random_sample = True
+            if (i % self.batch_size) < 2 * self.num_pairs_per_batch:
+                while remain_pairs.data:
+                    pair = remain_pairs.choice()
+                    if class_indices[pair[0]].data and class_indices[pair[1]].data:
+                        idx_0 = class_indices[pair[0]].choice_and_remove()
+                        total_indices.remove(idx_0)
+                        yield idx_0
+
+                        idx_1 = class_indices[pair[1]].choice_and_remove()
+                        total_indices.remove(idx_1)
+                        yield idx_1
+
+                        i += 2
+                        use_random_sample = False
+                        break
+
+                    else:
+                        remain_pairs.remove(pair)
+
+            if use_random_sample:
+                idx = total_indices.choice_and_remove()
+                chosen_class = self.dataset[idx]["class"]
+                class_indices[chosen_class].remove(idx)
+                i += 1
+                yield idx
+
+
+def get_confused_pair_dataloader(
+    df: pl.DataFrame, confusion_pairs: list[tuple[str, str]], num_data_per_batch: int, num_pairs_per_batch: int
+) -> DataLoader:
+    dataset = Dataset.from_polars(df)
+    sampler = ConfusedPairSampler(
+        dataset=dataset,
+        confusion_pairs=confusion_pairs,
+        batch_size=num_data_per_batch,
+        num_pairs_per_batch=num_pairs_per_batch,
+    )
+    return DataLoader(dataset=dataset, batch_size=num_data_per_batch, sampler=sampler)

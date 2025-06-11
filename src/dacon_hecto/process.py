@@ -98,8 +98,8 @@ class DataProcessorWithAugmentation(DataProcessor):
         self.num_data_per_image = num_data_per_image
         self.augment_processor = A.Compose(
             [
-                CropDown(p=0.25, ratio=(0.0, 0.3)),
-                CropRight(p=0.25, ratio=(0.0, 0.3)),
+                CropDown(p=0.25, ratio=(0.1, 0.4)),
+                CropRight(p=0.25, ratio=(0.1, 0.4)),
                 CropLeftAndUp(p=0.5, left=(0, 20), up=(0, 20)),
                 A.RandomBrightnessContrast(p=0.5),
                 A.CoarseDropout(p=0.5),

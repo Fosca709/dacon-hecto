@@ -1,4 +1,5 @@
 import os
+import pickle
 import shutil
 import sys
 from pathlib import Path
@@ -106,7 +107,7 @@ def _train(
 ) -> None:
     assert epoch_freeze <= epoch
 
-    if save_path is not None and os.path.exists(save_path):
+    if save_path is not None and os.path.exists(save_path) and save_strategy != "no":
         raise Exception("save_path already exists")
 
     if log_path is not None and os.path.exists(log_path):
@@ -348,6 +349,8 @@ class TrainConfig(BaseConfig):
     num_data_per_batch: int = 32
     accumulation_steps: int = 1
     eval_batch_size: int = 32
+    use_confusion_pairs: bool = False
+    num_pairs_per_batch: int = 1
     processor_type: str = "letterbox"
     use_augmentation: bool = True
     num_data_per_image: int = 4
@@ -383,17 +386,31 @@ def train(
     data_path: Path,
     save_path: Path | None = None,
     log_path: Path | None = None,
+    confusion_pairs_path: Path | None = None,
     save_strategy: str = "no",
     progress_refresh_per_second: float = 1.0,
 ) -> None:
     class_names = get_class_names(data_path)
     class2id = {c: i for i, c in enumerate(class_names)}
 
+    if config.use_confusion_pairs:
+        if confusion_pairs_path is None:
+            raise Exception("`confusion_pairs_path` must be set for `use_confusion_pairs`")
+
+        with open(confusion_pairs_path, "rb") as f:
+            confusion_pairs = pickle.load(f)
+
+    else:
+        confusion_pairs = None
+
     train_dataloader, val_dataloader = get_dataloader_from_config(
         data_path=data_path,
         num_data_per_batch=config.num_data_per_batch,
         eval_batch_size=config.eval_batch_size,
         use_val=config.use_val,
+        use_confused_pairs=config.use_confusion_pairs,
+        num_pairs_per_batch=config.num_pairs_per_batch,
+        confusion_pairs=confusion_pairs,
         debug=config.debug,
     )
     logger.info(f"train_dataloader size: {len(train_dataloader)}")
