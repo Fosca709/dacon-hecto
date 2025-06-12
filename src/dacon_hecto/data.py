@@ -82,7 +82,7 @@ def get_dataloader_from_config(
     num_data_per_batch: int,
     eval_batch_size: int = 32,
     use_val: bool = True,
-    use_confused_pairs: bool = False,
+    use_confusion_pairs: bool = False,
     num_pairs_per_batch: int = 1,
     confusion_pairs: list[tuple[str, str]] | None = None,
     debug: bool = False,
@@ -102,11 +102,11 @@ def get_dataloader_from_config(
             df_train = df
             df_val = None
 
-    if use_confused_pairs:
+    if not use_confusion_pairs:
         train_dataloader = get_dataloader(df=df_train, num_data_per_batch=num_data_per_batch, shuffle=True)
     else:
         train_dataloader = get_confused_pair_dataloader(
-            df=df,
+            df=df_train,
             confusion_pairs=confusion_pairs,
             num_data_per_batch=num_data_per_batch,
             num_pairs_per_batch=num_pairs_per_batch,
@@ -177,12 +177,14 @@ class ConfusedPairSampler(Sampler):
         return len(self.dataset)
 
     def __iter__(self):
-        remain_pairs = SetWithChoice(data=self.confusion_pairs)
         total_indices = SetWithChoice(data=list(range(len(self.dataset))))
         class_indices = defaultdict(list)
         for i, d in enumerate(self.dataset):
             class_indices[d["class"]].append(i)
         class_indices = {k: SetWithChoice(data=v) for k, v in class_indices.items()}
+
+        confusion_pairs = [(a, b) for a, b in self.confusion_pairs if (a in class_indices) and (b in class_indices)]
+        remain_pairs = SetWithChoice(data=confusion_pairs)
 
         i = 0
         while i < len(self.dataset):

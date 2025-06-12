@@ -52,6 +52,8 @@ class Classifier(nn.Module):
         device: str | torch.device,
         image_size: tuple[int] | None,
         num_classes: int,
+        model_type: str | None = None,
+        hidden_dim: int | None = None,
     ) -> Self:
         clip_model, _, preprocess = open_clip.create_model_and_transforms(
             model_name=model_name,
@@ -62,7 +64,12 @@ class Classifier(nn.Module):
         )
 
         vision_encoder = clip_model.visual
-        hidden_dim = vision_encoder.output_dim
+
+        if hidden_dim is None:
+            if model_type == "vit":
+                hidden_dim = vision_encoder.output_dim
+            else:
+                raise Exception("`hidden_dim` must be set when using this `model_type`")
 
         normalize_mean, normalize_std = None, None
         for t in preprocess.transforms:

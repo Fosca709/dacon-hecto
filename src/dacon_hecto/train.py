@@ -408,7 +408,7 @@ def train(
         num_data_per_batch=config.num_data_per_batch,
         eval_batch_size=config.eval_batch_size,
         use_val=config.use_val,
-        use_confused_pairs=config.use_confusion_pairs,
+        use_confusion_pairs=config.use_confusion_pairs,
         num_pairs_per_batch=config.num_pairs_per_batch,
         confusion_pairs=confusion_pairs,
         debug=config.debug,
