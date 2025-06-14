@@ -346,6 +346,7 @@ class TrainConfig(BaseConfig):
     run_name: str = "test"
     use_val: bool = True
     debug: bool = False
+    random_state: int = 42
     num_data_per_batch: int = 32
     accumulation_steps: int = 1
     eval_batch_size: int = 32
@@ -412,6 +413,7 @@ def train(
         num_pairs_per_batch=config.num_pairs_per_batch,
         confusion_pairs=confusion_pairs,
         debug=config.debug,
+        random_state=config.random_state,
     )
     logger.info(f"train_dataloader size: {len(train_dataloader)}")
     size_val_dataloader = None if (val_dataloader is None) else len(val_dataloader)

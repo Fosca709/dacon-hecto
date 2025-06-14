@@ -86,17 +86,18 @@ def get_dataloader_from_config(
     num_pairs_per_batch: int = 1,
     confusion_pairs: list[tuple[str, str]] | None = None,
     debug: bool = False,
+    random_state: int = 42,
 ) -> tuple[DataLoader, DataLoader | None]:
     df = get_train_dataframe(data_path)
 
     if debug:
-        df_train, df_val = get_debug_dataframes(df)
+        df_train, df_val = get_debug_dataframes(df, seed=random_state)
         if not use_val:
             df_val = None
 
     else:
         if use_val:
-            df_train, df_val = train_val_split(df)
+            df_train, df_val = train_val_split(df, random_state=random_state)
 
         else:
             df_train = df
