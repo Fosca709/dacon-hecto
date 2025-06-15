@@ -236,3 +236,25 @@ def make_confusion_pairs(
 
     with open(data_path / save_name, "wb") as f:
         pickle.dump(pairs, f)
+
+
+def ensemble(submissions: list[pl.DataFrame], class_names: list[str], epsilon: float = 0.0) -> pl.DataFrame:
+    values = []
+    ids = submissions[0]["ID"]
+
+    for df in submissions:
+        cols = df.columns[1:-5]
+        assert cols == class_names
+
+        values.append(df[cols].to_numpy())
+
+    probs = sum(values) / len(submissions)
+
+    if epsilon > 0.0:
+        preds = np.argmax(probs, axis=1)
+        probs = np.clip(probs, a_min=epsilon, a_max=1.0)
+        probs[np.arange(probs.shape[0]), preds] = 0.0
+        pred_probs = 1 - probs.sum(axis=1)
+        probs[np.arange(probs.shape[0]), preds] = pred_probs
+
+    return make_submission(probs, ids, class_names)
